@@ -271,6 +271,11 @@ mod tests {
 
         for (key, value) in array.iter().enumerate() {
             assert_eq!(hashmap.get(key), Some(value));
+            assert_eq!(hashmap.remove(key), Some(*value));
+        }
+
+        for key in 0..1_000_000 {
+            assert_eq!(hashmap.get(key), None);
         }
     }
 
