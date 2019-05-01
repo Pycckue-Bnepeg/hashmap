@@ -7,6 +7,7 @@ use std::ptr::NonNull;
 
 const EMPTY: u8 = 0;
 const TAKEN: u8 = 1;
+const DELETED: u8 = 2;
 
 struct Slot<T> {
     flag: u8, // не самое оптимальное решение по памяти из-за выравнивания структуры
@@ -59,7 +60,7 @@ impl<V> HashMap<V> {
         (0..capacity).map(move |idx| (hash + idx) % capacity)
     }
 
-    fn find(&self, key: usize) -> Option<&mut Slot<V>> {
+    fn find(&self, key: usize) -> Option<(usize, &mut Slot<V>)> {
         if self.capacity == 0 {
             return None;
         }
@@ -75,7 +76,7 @@ impl<V> HashMap<V> {
             }
 
             if slot.flag == TAKEN && slot.key == key {
-                return Some(slot);
+                return Some((idx, slot));
             }
         }
 
@@ -88,7 +89,7 @@ impl<V> HashMap<V> {
         for idx in self.prob_seq(hash) {
             let slot = unsafe { &*slots.add(idx) };
 
-            if slot.flag == EMPTY {
+            if slot.flag != TAKEN {
                 return idx;
             }
         }
@@ -97,15 +98,15 @@ impl<V> HashMap<V> {
     }
 
     pub fn get<'a>(&'a self, key: usize) -> Option<&'a V> {
-        self.find(key).map(|slot| &slot.value)
+        self.find(key).map(|(_, slot)| &slot.value)
     }
 
     pub fn get_mut<'a>(&'a mut self, key: usize) -> Option<&'a mut V> {
-        self.find(key).map(|slot| &mut slot.value)
+        self.find(key).map(|(_, slot)| &mut slot.value)
     }
 
     pub fn insert(&mut self, key: usize, value: V) -> Option<V> {
-        if let Some(slot) = self.find(key) {
+        if let Some((_, slot)) = self.find(key) {
             Some(std::mem::replace(&mut slot.value, value))
         } else {
             self.reserve(1);
@@ -131,9 +132,48 @@ impl<V> HashMap<V> {
         self.items += 1;
     }
 
+    unsafe fn find_hash_window(&self, hash: usize) -> usize {
+        let mut length = 0;
+        let slots = self.slots.as_ptr();
+
+        while (&*slots.add(hash + length)).key % self.capacity() == hash {
+            length += 1;
+        }
+
+        length
+    }
+
+    unsafe fn is_window_ready_to_empty(&self, hash: usize, length: usize) -> bool {
+        let mut idx = 0;
+        let mut ready = true;
+        let slots = self.slots.as_ptr();
+
+        while idx < length {
+            let slot = &*slots.add(hash + idx);
+
+            if slot.flag != DELETED {
+                ready = false;
+            }
+
+            idx += 1;
+        }
+
+        ready
+    }
+
     pub fn remove(&mut self, key: usize) -> Option<V> {
-        let value = self.find(key).map(|slot| unsafe {
-            slot.flag = EMPTY;
+        let value = self.find(key).map(|(idx, slot)| unsafe {
+            let hash = slot.key % self.capacity;
+            let window_length = self.find_hash_window(hash);
+
+            if window_length == (idx - hash + 1)
+                && self.is_window_ready_to_empty(hash, window_length - 1)
+            {
+                slot.flag = EMPTY;
+            } else {
+                slot.flag = DELETED;
+            }
+
             std::mem::replace(&mut slot.value, std::mem::zeroed())
         })?;
 
@@ -247,6 +287,19 @@ mod tests {
 
         assert_eq!(hashmap.get(2).copied(), Some(0.1));
         assert_eq!(hashmap.get(4).copied(), Some(0.2));
+    }
+
+    #[test]
+    fn collision_remove() {
+        let mut hashmap: HashMap<f32> = HashMap::with_capacity(4);
+        hashmap.insert(4, 0.1); // 4 % 4 == 0
+        hashmap.insert(8, 0.2); // 8 % 4 == 0
+        hashmap.insert(12, 0.3); // 12 % 4 == 0
+
+        hashmap.remove(8);
+
+        assert_eq!(hashmap.get(4).copied(), Some(0.1));
+        assert_eq!(hashmap.get(12).copied(), Some(0.3));
     }
 
     #[test]
